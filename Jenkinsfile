@@ -3,15 +3,15 @@ pipeline {
     agent any
 
     environment {
-        APP_NAME = 'jenkins-cicd-app'
         IMAGE_NAME = 'jenkins-cicd-python'
-        IMAGE_TAG = '1.0.0'
+        IMAGE_TAG = '2.0'
+        APP_NAME = 'jenkins-cicd-app'
     }
 
     stages {
+
         stage('Checkout') {
             steps {
-                echo 'Source code is checked out.'
                 checkout scm
             }
         }
@@ -39,47 +39,63 @@ pipeline {
                 '''
             }
         }
-	stage('Trivy Security Scan') {
-    	   steps {
-        	sh '''
-            	trivy image \
-              	--severity HIGH,CRITICAL \
-              	--exit-code 1 \
-              	--no-progress \
-              	${IMAGE_NAME}:${IMAGE_TAG}
-        	'''
-    		}	
-	}
 
-        stage('Deploy Application') {
+        stage('Trivy Security Scan') {
             steps {
                 sh '''
-                    docker rm -f ${APP_NAME} || true
-
-                    docker run -d \
-                      --name ${APP_NAME} \
-                      --restart unless-stopped \
-                      -p 5000:5000 \
+                    trivy image \
+                      --severity HIGH,CRITICAL \
+                      --exit-code 1 \
+                      --no-progress \
                       ${IMAGE_NAME}:${IMAGE_TAG}
                 '''
             }
         }
 
-        stage('Health Check') {
+        stage('Load Image into Minikube') {
             steps {
                 sh '''
-                    for i in $(seq 1 15); do
-                        if curl -fsS \
-                          http://localhost:5000/health; then
-                            echo "Health check passed."
-                            exit 0
-                        fi
-                        sleep 2
-                    done
+                    minikube image load ${IMAGE_NAME}:${IMAGE_TAG}
+                '''
+            }
+        }
 
-                    echo "Health check failed."
-                    docker logs ${APP_NAME} || true
-                    exit 1
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh '''
+                    kubectl apply -f kubernetes/namespace.yaml
+
+                    kubectl apply -f kubernetes/deployment.yaml
+                    kubectl apply -f kubernetes/service.yaml
+                    kubectl apply -f kubernetes/hpa.yaml
+
+                    kubectl rollout status \
+                      deployment/${APP_NAME} \
+                      --timeout=180s
+                '''
+            }
+        }
+
+        stage('Deploy Monitoring') {
+            steps {
+                sh '''
+                    kubectl apply -f kubernetes/prometheus-rbac.yaml
+                    kubectl apply -f kubernetes/prometheus-config.yaml
+                    kubectl apply -f kubernetes/prometheus-deployment.yaml
+
+                    kubectl apply -f kubernetes/grafana-datasource.yaml
+                    kubectl apply -f kubernetes/grafana-deployment.yaml
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                sh '''
+                    kubectl get deployments
+                    kubectl get pods
+                    kubectl get services
+                    kubectl get pods -n monitoring
                 '''
             }
         }
